@@ -100,9 +100,15 @@ static PHP_METHOD(R, init)
 	char **argv_arr;
 	zval **element;
 	int i;
+	char *r_home;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|a", &argv) == FAILURE) {
 		return;
+	}
+
+	r_home = getenv("R_HOME");
+	if (!r_home || r_home[0] == '\0') {
+		setenv("R_HOME", PHP_R_DIR, 0);
 	}
 
 	R_SetErrorHook(php_r_error_handler);
