@@ -40,7 +40,10 @@ if test "$PHP_ARRR" != "no"; then
   ],[
     -L$ARRR_DIR/lib
   ])
- 
+
+  NORMALIZED_R_DIR=`cd "${ARRR_DIR}"; pwd`
+  AC_DEFINE_UNQUOTED([PHP_R_DIR], ["$NORMALIZED_R_DIR"], [R home dir])
+
   PHP_ADD_LIBRARY(Rblas)
   PHP_ADD_INCLUDE($ARRR_DIR/include)
   PHP_SUBST(ARRR_SHARED_LIBADD)

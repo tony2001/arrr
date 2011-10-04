@@ -32,6 +32,7 @@
 #include <Rembedded.h>
 #include <Rdefines.h>
 #include <R_ext/Parse.h>
+#include <Rversion.h>
 
 #ifdef COMPILE_DL_ARRR
 ZEND_GET_MODULE(arrr)
@@ -88,40 +89,44 @@ static int php_is_r_primitive(SEXP val, SEXPTYPE *type) /* {{{ */
 
 /* }}} */
 
-/* {{{ proto void R::init(array argv)
+/* {{{ proto void R::init([array argv])
  
  */
 static PHP_METHOD(R, init)
 { 
-	zval *argv;
+	zval *argv = NULL;
 	int argc = 3;
 	HashPosition pos;
 	char **argv_arr;
 	zval **element;
 	int i;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "a", &argv) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|a", &argv) == FAILURE) {
 		return;
 	}
 
 	R_SetErrorHook(php_r_error_handler);
 	R_SetWarningHook(php_r_warning_handler);
 
-	argc += zend_hash_num_elements(Z_ARRVAL_P(argv));
+	if (argv) {
+		argc += zend_hash_num_elements(Z_ARRVAL_P(argv));
+	}
 	argv_arr = safe_emalloc(argc, sizeof(char *), 0);
 
 	argv_arr[0] = "REmbeddedPHP";
 	argv_arr[1] = "--gui=none";
 	argv_arr[2] = "--silent";
 
-	i = 3;
-	for (zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(argv), &pos);
-			zend_hash_get_current_data_ex(Z_ARRVAL_P(argv), (void **) &element, &pos) == SUCCESS;
-			zend_hash_move_forward_ex(Z_ARRVAL_P(argv), &pos)
-		) {
-		convert_to_string_ex(element);
-		argv_arr[i] = Z_STRVAL_PP(element); /* no copy here, libR does strdup() itself */
-		i++;
+	if (argv) {
+		i = 3;
+		for (zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(argv), &pos);
+				zend_hash_get_current_data_ex(Z_ARRVAL_P(argv), (void **) &element, &pos) == SUCCESS;
+				zend_hash_move_forward_ex(Z_ARRVAL_P(argv), &pos)
+			) {
+			convert_to_string_ex(element);
+			argv_arr[i] = Z_STRVAL_PP(element); /* no copy here, libR does strdup() itself */
+			i++;
+		}
 	}
 	Rf_initEmbeddedR(argc, argv_arr);
 	efree(argv_arr);
@@ -152,9 +157,15 @@ static PHP_METHOD(R, parseEval)
 	int code_len, error_occured = 0;
 	SEXP e1, e2, tmp, val_parse, val, next;
 	SEXPTYPE type;
+	zval *result = NULL;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &code, &code_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|z/", &code, &code_len, &result) == FAILURE) {
 		return;
+	}
+
+	if (result) {
+		zval_dtor(result);
+		ZVAL_NULL(result);
 	}
 
 	PROTECT(e1 = allocVector(LANGSXP, 2));
@@ -190,28 +201,37 @@ static PHP_METHOD(R, parseEval)
 		/* ignore the return value */
 	} else if (php_is_r_primitive(val, &type)) {
 		int i;
-		array_init(return_value);
+		zval *result_var;
+
+		if (result) {
+			result_var = result;
+		} else {
+			result_var = return_value;
+		}
+		array_init(result_var);
 		for (i = 0; i < GET_LENGTH(val); i++) {
 			switch (type) {
 				case STRSXP:
-					add_next_index_string(return_value, CHAR(STRING_ELT(val, 0)), 1);
+					add_next_index_string(result_var, CHAR(STRING_ELT(val, 0)), 1);
 					break;
 				case LGLSXP:
-					add_next_index_bool(return_value, LOGICAL_DATA(val)[0] ? 1 : 0);
+					add_next_index_bool(result_var, LOGICAL_DATA(val)[0] ? 1 : 0);
 					break;
 				case INTSXP:
-					add_next_index_long(return_value, INTEGER_DATA(val)[0]);
+					add_next_index_long(result_var, INTEGER_DATA(val)[0]);
 					break;
 				case REALSXP:
-					add_next_index_double(return_value, NUMERIC_DATA(val)[0]);
+					add_next_index_double(result_var, NUMERIC_DATA(val)[0]);
 					break;
 				default:
-					add_next_index_null(return_value);
+					add_next_index_null(result_var);
 					break;
 			}
 		}
-		UNPROTECT(2);
-		return;
+		if (!result) {
+			UNPROTECT(2);
+			return;
+		}
 	}
 
 	UNPROTECT(2);
@@ -438,17 +458,35 @@ static PHP_METHOD(R, callWithNames)
 }
 /* }}} */
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_r_init, 0, 0, 0)
+	ZEND_ARG_INFO(0, argv)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_r_end, 0, 0, 1)
+	ZEND_ARG_INFO(0, fatal)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_r_parseEval, 0, 0, 1)
+	ZEND_ARG_INFO(0, code)
+	ZEND_ARG_INFO(1, result)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_r_callWithNames, 0, 0, 2)
+	ZEND_ARG_INFO(0, function_name)
+	ZEND_ARG_INFO(0, arguments)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_r___call, 0, 0, 2)
 	ZEND_ARG_INFO(0, function_name)
 	ZEND_ARG_INFO(0, arguments)
 ZEND_END_ARG_INFO()
 
 static zend_function_entry r_methods[] = { /* {{{ */
-	PHP_ME(R, init, NULL, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
-	PHP_ME(R, end, NULL, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
-	PHP_ME(R, parseEval, NULL, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	PHP_ME(R, init, arginfo_r_init, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	PHP_ME(R, end, arginfo_r_end, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	PHP_ME(R, parseEval, arginfo_r_parseEval, ZEND_ACC_PUBLIC)
 	PHP_ME(R, __call, arginfo_r___call, ZEND_ACC_PUBLIC)
-	PHP_ME(R, callWithNames, NULL, ZEND_ACC_PUBLIC)
+	PHP_ME(R, callWithNames, arginfo_r_callWithNames, ZEND_ACC_PUBLIC)
 	{NULL, NULL, NULL}
 };
 /* }}} */
@@ -489,8 +527,13 @@ PHP_RSHUTDOWN_FUNCTION(arrr) /* {{{ */
 
 PHP_MINFO_FUNCTION(arrr) /* {{{ */
 {
+	char ver[512];
+
 	php_info_print_table_start();
-	php_info_print_table_header(2, "arrr support", "enabled");
+	php_info_print_table_header(2, "R support", "enabled");
+	slprintf(ver, sizeof(ver), "%s.%s (SVN rev %s)", R_MAJOR, R_MINOR, R_SVN_REVISION);
+	php_info_print_table_row(2, "R version", ver);
+	php_info_print_table_row(2, "Compile-time R_HOME", PHP_R_DIR);
 	php_info_print_table_end();
 
 }
