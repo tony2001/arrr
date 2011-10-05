@@ -41,8 +41,11 @@ ZEND_GET_MODULE(arrr)
 static zend_class_entry *ce_r;
 static zend_object_handlers php_r_handlers;
 
+/* since these functions are not in the headers, I have to declare them myself */
 void R_SetErrorHook(void (*hook)(SEXP, char *));
 void R_SetWarningHook(void (*hook)(SEXP, char *));
+
+static SEXP php_zval_to_r(zval **value);
 
 /* {{{ internal funcs */
 
@@ -86,6 +89,124 @@ static int php_is_r_primitive(SEXP val, SEXPTYPE *type) /* {{{ */
 	return is;
 }
 /* }}} */
+
+static SEXP php_hash_to_r(HashTable *ht) /* {{{ */
+{
+	SEXP values, keys, r_element;
+	int n, i;
+	HashPosition pos;
+	zval **element;
+
+	n = zend_hash_num_elements(ht);
+	if (!n) {
+		return 0;
+	}
+
+	PROTECT(values = NEW_LIST(n));
+	PROTECT(keys = NEW_CHARACTER(n));
+
+	i = 0;
+	for (zend_hash_internal_pointer_reset_ex(ht, &pos);
+			zend_hash_get_current_data_ex(ht, (void **) &element, &pos) == SUCCESS;
+			zend_hash_move_forward_ex(ht, &pos)
+		) {
+		char *string_key;
+		uint string_key_len;
+		ulong num_key;
+
+		r_element = php_zval_to_r(element);
+
+		switch (zend_hash_get_current_key_ex(ht, &string_key, &string_key_len, &num_key, 0, &pos)) {
+			case HASH_KEY_IS_STRING:
+				if (string_key_len > 0) {
+					SET_STRING_ELT(keys, i, COPY_TO_USER_STRING(string_key));
+				}
+				break;
+
+			case HASH_KEY_IS_LONG:
+				/* ignore the key */
+				break;
+		}
+		i++;
+	}
+	SET_NAMES(values, keys);
+	UNPROTECT(2);
+	return values;
+}
+/* }}} */
+
+static SEXP php_zval_to_r(zval **value) /* {{{ */
+{
+	SEXP result = NULL_USER_OBJECT;
+
+	switch (Z_TYPE_PP(value)) {
+		case IS_LONG:
+			PROTECT(result = NEW_INTEGER(1));
+			INTEGER_DATA(result)[0] = Z_LVAL_PP(value);
+			UNPROTECT(1);
+			break;
+		case IS_DOUBLE:
+			PROTECT(result = NEW_NUMERIC(1));
+			NUMERIC_DATA(result)[0] = Z_DVAL_PP(value);
+			UNPROTECT(1);
+			break;
+		case IS_STRING:
+			PROTECT(result = NEW_CHARACTER(1));
+			SET_STRING_ELT(result, 0, COPY_TO_USER_STRING(Z_STRVAL_PP(value)));
+			UNPROTECT(1);
+			break;
+		case IS_BOOL:
+			PROTECT(result = NEW_LOGICAL(1));
+			LOGICAL_DATA(result)[0] = Z_BVAL_PP(value);
+			UNPROTECT(1);
+			break;
+		case IS_ARRAY:
+			result = php_hash_to_r(Z_ARRVAL_PP(value));
+			break;
+		default:
+			convert_to_string_ex(value);
+			PROTECT(result = NEW_CHARACTER(1));
+			SET_STRING_ELT(result, 0, COPY_TO_USER_STRING(Z_STRVAL_PP(value)));
+			UNPROTECT(1);
+			break;
+	}
+	return result;
+}
+/* }}} */
+
+static void php_r_to_zval(SEXP value, zval *result) /* {{{ */
+{
+	int value_len, i;
+
+	zval_dtor(result);
+	array_init(result);
+
+	value_len = GET_LENGTH(value);
+
+	if (value_len == 0) {
+		return;
+	}
+	
+	for (i = 0; i < value_len; i++) {
+		switch (TYPEOF(value)) {
+			case INTSXP:
+				add_next_index_long(result, INTEGER_DATA(value)[i]);
+				break;
+			case REALSXP:
+				add_next_index_double(result, NUMERIC_DATA(value)[i]);
+				break;
+			case LGLSXP:
+				add_next_index_bool(result, LOGICAL_DATA(value)[i]);
+				break;
+			case STRSXP:
+				add_next_index_string(result, CHAR(STRING_ELT(value, 0)), 1);
+				break;
+		}
+	}
+	return;
+}
+/* }}} */
+
 
 /* }}} */
 
@@ -139,14 +260,14 @@ static PHP_METHOD(R, init)
 }
 /* }}} */
 
-/* {{{ proto void R::end(bool fatal)
+/* {{{ proto void R::end([bool fatal])
  
  */
 static PHP_METHOD(R, end)
 { 
-	zend_bool fatal;
+	zend_bool fatal = 0;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "b", &fatal) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|b", &fatal) == FAILURE) {
 		return;
 	}
 	
@@ -162,7 +283,6 @@ static PHP_METHOD(R, parseEval)
 	char *code;
 	int code_len, error_occured = 0;
 	SEXP e1, e2, tmp, val_parse, val, next;
-	SEXPTYPE type;
 	zval *result = NULL;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|z/", &code, &code_len, &result) == FAILURE) {
@@ -203,45 +323,14 @@ static PHP_METHOD(R, parseEval)
 		RETURN_FALSE;
 	}
 
-	if (val == NULL_USER_OBJECT || GET_LENGTH(val) == 0) {
-		/* ignore the return value */
-	} else if (php_is_r_primitive(val, &type)) {
-		int i;
-		zval *result_var;
-
-		if (result) {
-			result_var = result;
-		} else {
-			result_var = return_value;
-		}
-		array_init(result_var);
-		for (i = 0; i < GET_LENGTH(val); i++) {
-			switch (type) {
-				case STRSXP:
-					add_next_index_string(result_var, CHAR(STRING_ELT(val, 0)), 1);
-					break;
-				case LGLSXP:
-					add_next_index_bool(result_var, LOGICAL_DATA(val)[0] ? 1 : 0);
-					break;
-				case INTSXP:
-					add_next_index_long(result_var, INTEGER_DATA(val)[0]);
-					break;
-				case REALSXP:
-					add_next_index_double(result_var, NUMERIC_DATA(val)[0]);
-					break;
-				default:
-					add_next_index_null(result_var);
-					break;
-			}
-		}
-		if (!result) {
-			UNPROTECT(2);
-			return;
-		}
+	if (result) {
+		php_r_to_zval(val, result);
+		UNPROTECT(2);
+		RETURN_TRUE;
+	} else {
+		php_r_to_zval(val, return_value);
+		UNPROTECT(2);
 	}
-
-	UNPROTECT(2);
-	RETURN_TRUE;
 }
 /* }}} */
 
@@ -279,26 +368,8 @@ static PHP_METHOD(R, __call)
 		zend_hash_get_current_data_ex(Z_ARRVAL_P(args), (void **)&element, &pos) == SUCCESS;
 		zend_hash_move_forward_ex(Z_ARRVAL_P(args), &pos)
 		) {
-	
-		arg = NULL_USER_OBJECT;
 
-		switch(Z_TYPE_PP(element)) {
-			case IS_LONG:
-				PROTECT(arg = NEW_INTEGER(1));
-				INTEGER_DATA(arg)[0] = Z_LVAL_PP(element);
-				UNPROTECT(1);
-				break;
-			case IS_STRING:
-				PROTECT(arg = NEW_CHARACTER(1));
-				SET_STRING_ELT(arg, 0, COPY_TO_USER_STRING(Z_STRVAL_PP(element)));
-				UNPROTECT(1);
-				break;
-			case IS_DOUBLE:
-				PROTECT(arg = NEW_NUMERIC(1));
-				NUMERIC_DATA(arg)[0] = Z_DVAL_PP(element);
-				UNPROTECT(1);
-				break;
-		}
+		arg = php_zval_to_r(element);
 
 		SETCAR(next, arg);
 		next = CDR(next);
@@ -358,7 +429,6 @@ static PHP_METHOD(R, callWithNames)
 	SEXP e, fun, val, arg, next;
 	HashPosition pos;
 	zval **element;
-	SEXPTYPE type;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sa", &func, &func_len, &args) == FAILURE) {
 		return;
@@ -386,25 +456,7 @@ static PHP_METHOD(R, callWithNames)
 		uint string_key_len;
 		ulong num_key;
 
-		arg = NULL_USER_OBJECT;
-
-		switch(Z_TYPE_PP(element)) {
-			case IS_LONG:
-				PROTECT(arg = NEW_INTEGER(1));
-				INTEGER_DATA(arg)[0] = Z_LVAL_PP(element);
-				UNPROTECT(1);
-				break;
-			case IS_STRING:
-				PROTECT(arg = NEW_CHARACTER(1));
-				SET_STRING_ELT(arg, 0, COPY_TO_USER_STRING(Z_STRVAL_PP(element)));
-				UNPROTECT(1);
-				break;
-			case IS_DOUBLE:
-				PROTECT(arg = NEW_NUMERIC(1));
-				NUMERIC_DATA(arg)[0] = Z_DVAL_PP(element);
-				UNPROTECT(1);
-				break;
-		}
+		arg = php_zval_to_r(element);
 
 		switch (zend_hash_get_current_key_ex(Z_ARRVAL_P(args), &string_key, &string_key_len, &num_key, 0, &pos)) {
 			case HASH_KEY_IS_STRING:
@@ -430,45 +482,17 @@ static PHP_METHOD(R, callWithNames)
 
 	/* okay, the call succeeded */
 	PROTECT(val);
-
-	if (val == NULL_USER_OBJECT || GET_LENGTH(val) == 0) {
-		/* ignore the return value */
-	} else if (php_is_r_primitive(val, &type)) {
-		int i;
-		array_init(return_value);
-		for (i = 0; i < GET_LENGTH(val); i++) {
-			switch (type) {
-				case STRSXP:
-					add_next_index_string(return_value, CHAR(STRING_ELT(val, 0)), 1);
-					break;
-				case LGLSXP:
-					add_next_index_bool(return_value, LOGICAL_DATA(val)[0] ? 1 : 0);
-					break;
-				case INTSXP:
-					add_next_index_long(return_value, INTEGER_DATA(val)[0]);
-					break;
-				case REALSXP:
-					add_next_index_double(return_value, NUMERIC_DATA(val)[0]);
-					break;
-				default:
-					add_next_index_null(return_value);
-					break;
-			}
-		}
-		UNPROTECT(3);
-		return;
-	}
-
+	php_r_to_zval(val, return_value);
 	UNPROTECT(3);
-	RETURN_TRUE;
 }
 /* }}} */
 
+/* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_r_init, 0, 0, 0)
 	ZEND_ARG_INFO(0, argv)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_r_end, 0, 0, 1)
+ZEND_BEGIN_ARG_INFO_EX(arginfo_r_end, 0, 0, 0)
 	ZEND_ARG_INFO(0, fatal)
 ZEND_END_ARG_INFO()
 
@@ -486,6 +510,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_r___call, 0, 0, 2)
 	ZEND_ARG_INFO(0, function_name)
 	ZEND_ARG_INFO(0, arguments)
 ZEND_END_ARG_INFO()
+/* }}} */
 
 static zend_function_entry r_methods[] = { /* {{{ */
 	PHP_ME(R, init, arginfo_r_init, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
