@@ -19,9 +19,10 @@ for (k in 1:20) {        # loop with 20 iterations
 write.gif(X, "/tmp/Mandelbrot.gif", col=jet.colors, delay=100)
 END;
 
-var_dump($code);
-
 $r = new R;
 $r->init();
-var_dump($r->parseEval($code));
+$r->parseEval($code);
+
+echo "now check out /tmp/Mandelbrot.gif..\n";
+
 ?>
