@@ -1,2 +1,52 @@
 PHP extension-wrapper for embedded R language
 
+PHP API:
+
+ void R::init([array argv])
+---------------------------
+Initialize the R environment, takes options as arguments.
+Options "--gui=none" and "--silent" are hardcoded.
+
+Example:
+ $r = new R;
+ $r->init(array("digits"=>5));
+
+
+ void R::end([bool fatal])
+--------------------------
+Destroy the R environment and frees all the resources.
+Use fatal=TRUE flag for emergency bail out.
+
+
+ mixed R::parseEval(string code[, mixed &result])
+-------------------------------------------------
+Parse and execute R code. 
+The result argument can be used to return the result of the execution.
+In this case function returns true in case of success and false in case of failure.
+
+
+ mixed R::__call(string function_name, array arguments)
+-------------------------------------------------------
+Call a function with arguments.
+
+Example:
+
+$r = new R;
+$r->init();
+$r->parseEval("
+	fibonacci <- function(n) {
+		fib <- numeric(n)
+			fib [1:2] <- 1
+			for (i in 3:n) {
+				fib[i] <- fib[i-1] + fib[i-2]
+			}
+		return(fib[n])
+	}
+");
+var_dump($r->fibonacci(40));
+
+ mixed R::callWithNames(string function_name, array arguments)
+--------------------------------------------------------------
+Call a function with (optionally) named arguments.
+Named arguments may come in any order, that's the only difference from using __call().
+
